@@ -27,34 +27,50 @@ def validate_token(event):
         return False
     return True
 
+def is_ip_allowed(event):
+    # Attempt to extract IP from multiple locations
+    possible_ips = [
+        event.get('requestContext', {}).get('identity', {}).get('sourceIp', ''),
+        event.get('headers', {}).get('x-forwarded-for', '').split(',')[0].strip(),
+        event.get('requestContext', {}).get('http', {}).get('sourceIp', '')
+    ]
+    
+    allowed_ip = os.environ.get('ALLOWED_IP')
+    
+    # Log all detected IPs for debugging
+    logger.info(f"Possible IPs: {possible_ips}")
+    logger.info(f"Allowed IP: {allowed_ip}")
+    
+    # Check if any of the detected IPs match the allowed IP
+    for ip in possible_ips:
+        if ip and (ip == allowed_ip or 
+                   (allowed_ip and ip.startswith(allowed_ip))):
+            return True
+    
+    logger.error("No matching IP found")
+    return False
+
 def lambda_handler(event, context):
     # Log the full event for debugging
     logger.info(f"Received event: {json.dumps(event)}")
-
-    # Set CORS headers
-    headers = {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-        'Content-Type': 'application/json'
-    }
-
-    # Handle preflight CORS request
-    if event.get('httpMethod') == 'OPTIONS':
-        return {
-            'statusCode': 200,
-            'headers': headers,
-            'body': 'Preflight request successful'
-        }
 
     # Authentication check
     if not validate_token(event):
         return {
             'statusCode': 403,
-            'headers': headers,
             'body': json.dumps({
                 'error': 'Unauthorized',
                 'message': 'Invalid or missing authentication token'
+            })
+        }
+
+    # IP address validation check
+    if not is_ip_allowed(event):
+        return {
+            'statusCode': 403,
+            'body': json.dumps({
+                'error': 'Forbidden',
+                'message': 'Access denied from this IP address'
             })
         }
 
@@ -62,95 +78,137 @@ def lambda_handler(event, context):
         # Parse body from the event for Lambda function URL
         body = json.loads(event['body']) if 'body' in event else event
 
-        # Log parsed body for verification
-        logger.info(f"Parsed body: {json.dumps(body)}")
-
         # Extract parameters
         region = body.get('region')
-        instance_id = body.get('instance_id')
+        instance_ids = body.get('instance_id')
         action = body.get('action')
 
         # Validate parameters
-        if not all([region, instance_id, action]):
+        if not all([region, instance_ids, action]):
             logger.error("Missing required parameters")
             return {
                 'statusCode': 400,
-                'headers': headers,
                 'body': json.dumps({
                     'error': 'Missing required parameters',
                     'received_data': body
                 })
             }
 
+        # Ensure instance_ids is a list, even if the user provides a comma-separated string
+        if isinstance(instance_ids, str):
+            instance_ids = instance_ids.split(',')
+
         # Create EC2 client
         ec2 = boto3.client('ec2', region_name=region)
 
         # Perform action
         if action == 'stop':
-            response = ec2.stop_instances(InstanceIds=[instance_id])
-            logger.info(f"Stop instances response: {response}")
-            return {
-                'statusCode': 200,
-                'headers': headers,
-                'body': json.dumps({
-                    'message': f'Instance {instance_id} stopped',
-                    'response': str(response)
-                })
-            }
+            response = ec2.stop_instances(InstanceIds=instance_ids)
+            message = f"Stopped instances: {', '.join(instance_ids)}"
         elif action == 'start':
-            response = ec2.start_instances(InstanceIds=[instance_id])
-            logger.info(f"Start instances response: {response}")
-            return {
-                'statusCode': 200,
-                'headers': headers,
-                'body': json.dumps({
-                    'message': f'Instance {instance_id} started',
-                    'response': str(response)
-                })
-            }
+            response = ec2.start_instances(InstanceIds=instance_ids)
+            message = f"Started instances: {', '.join(instance_ids)}"
         elif action == 'reboot':
-            response = ec2.reboot_instances(InstanceIds=[instance_id])
-            logger.info(f"Reboot instances response: {response}")
-            return {
-                'statusCode': 200,
-                'headers': headers,
-                'body': json.dumps({
-                    'message': f'Instance {instance_id} rebooted',
-                    'response': str(response)
-                })
-            }
+            response = ec2.reboot_instances(InstanceIds=instance_ids)
+            message = f"Rebooted instances: {', '.join(instance_ids)}"
         elif action == 'terminate':
-            response = ec2.terminate_instances(InstanceIds=[instance_id])
-            logger.info(f"Terminate instances response: {response}")
-            return {
-                'statusCode': 200,
-                'headers': headers,
-                'body': json.dumps({
-                    'message': f'Instance {instance_id} terminated',
-                    'response': str(response)
-                })
-            }
+            response = ec2.terminate_instances(InstanceIds=instance_ids)
+            message = f"Terminated instances: {', '.join(instance_ids)}"
         else:
             logger.error(f"Invalid action: {action}")
             return {
                 'statusCode': 400,
-                'headers': headers,
                 'body': json.dumps({
                     'error': f'Invalid action: {action}',
                     'allowed_actions': ['start', 'stop', 'reboot', 'terminate']
                 })
             }
 
+        # Log the action taken
+        logger.info(f"{action.capitalize()} instances response: {response}")
+
+        # Return success response
+        return {
+            'statusCode': 200,
+            'body': json.dumps({
+                'message': message,
+                'response': str(response)
+            })
+        }
+
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
         return {
             'statusCode': 500,
-            'headers': headers,
             'body': json.dumps({
                 'error': f'Internal server error: {str(e)}',
                 'received_data': body if 'body' in locals() else 'No body received'
             })
         }
+
+```
+
+#### Finding IP 
+```python
+
+import json
+import logging
+
+# Configure logging
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+def get_requesting_ip(event):
+    # Attempt to extract IP from multiple locations
+    possible_ips = [
+        event.get('requestContext', {}).get('identity', {}).get('sourceIp', ''),
+        event.get('headers', {}).get('x-forwarded-for', '').split(',')[0].strip(),
+        event.get('requestContext', {}).get('http', {}).get('sourceIp', '')
+    ]
+    
+    # Log all detected IPs for debugging
+    logger.info(f"Possible IPs: {possible_ips}")
+    
+    # Return the first non-empty IP found
+    for ip in possible_ips:
+        if ip:
+            return ip
+    
+    # If no IP is found, return a default message
+    return "IP not found"
+
+def lambda_handler(event, context):
+    # Log the full event for debugging
+    logger.info(f"Received event: {json.dumps(event)}")
+
+    try:
+        # Get the requesting IP
+        requesting_ip = get_requesting_ip(event)
+
+        # Log the requesting IP for debugging
+        logger.info(f"Requesting IP: {requesting_ip}")
+
+        # Return the IP address in the response body
+        return {
+            'statusCode': 200,
+            'headers': {
+                'Content-Type': 'application/json'
+            },
+            'body': json.dumps({
+                'received_ip': requesting_ip
+            })
+        }
+
+    except Exception as e:
+        logger.error(f"Error processing request: {str(e)}")
+        return {
+            'statusCode': 500,
+            'body': json.dumps({
+                'error': f'Internal server error: {str(e)}'
+            })
+        }
+
+
 ```
 #### IAM Role for Lambda :
 ```json
