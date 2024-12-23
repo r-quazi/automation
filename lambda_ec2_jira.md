@@ -1,5 +1,8 @@
 ### Lambda Code :
 ```python
+
+
+
 import boto3
 import json
 import logging
@@ -27,29 +30,6 @@ def validate_token(event):
         return False
     return True
 
-def is_ip_allowed(event):
-    # Attempt to extract IP from multiple locations
-    possible_ips = [
-        event.get('requestContext', {}).get('identity', {}).get('sourceIp', ''),
-        event.get('headers', {}).get('x-forwarded-for', '').split(',')[0].strip(),
-        event.get('requestContext', {}).get('http', {}).get('sourceIp', '')
-    ]
-    
-    allowed_ip = os.environ.get('ALLOWED_IP')
-    
-    # Log all detected IPs for debugging
-    logger.info(f"Possible IPs: {possible_ips}")
-    logger.info(f"Allowed IP: {allowed_ip}")
-    
-    # Check if any of the detected IPs match the allowed IP
-    for ip in possible_ips:
-        if ip and (ip == allowed_ip or 
-                   (allowed_ip and ip.startswith(allowed_ip))):
-            return True
-    
-    logger.error("No matching IP found")
-    return False
-
 def lambda_handler(event, context):
     # Log the full event for debugging
     logger.info(f"Received event: {json.dumps(event)}")
@@ -61,16 +41,6 @@ def lambda_handler(event, context):
             'body': json.dumps({
                 'error': 'Unauthorized',
                 'message': 'Invalid or missing authentication token'
-            })
-        }
-
-    # IP address validation check
-    if not is_ip_allowed(event):
-        return {
-            'statusCode': 403,
-            'body': json.dumps({
-                'error': 'Forbidden',
-                'message': 'Access denied from this IP address'
             })
         }
 
@@ -145,6 +115,7 @@ def lambda_handler(event, context):
                 'received_data': body if 'body' in locals() else 'No body received'
             })
         }
+
 
 ```
 
