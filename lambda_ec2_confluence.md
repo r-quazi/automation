@@ -188,6 +188,172 @@ def lambda_handler(event, context):
 ```
 
 
+New confluence verion
+```python
+
+import boto3
+import json
+import base64
+import os
+from datetime import datetime
+from urllib import request, parse, error
+
+CONFLUENCE_API_URL = os.environ.get("CONFLUENCE_API_URL")
+PAGE_ID = os.environ.get("PAGE_ID")
+CONFLUENCE_API_TOKEN = os.environ.get("CONFLUENCE_API_TOKEN")
+CONFLUENCE_EMAIL = os.environ.get("CONFLUENCE_EMAIL")
+
+def fetch_all_ec2_instances():
+    ec2_data = []
+    client = boto3.client("ec2")
+    regions = [region["RegionName"] for region in client.describe_regions()["Regions"]]
+
+    for region in regions:
+        ec2 = boto3.client("ec2", region_name=region)
+        reservations = ec2.describe_instances()["Reservations"]
+        for reservation in reservations:
+            for instance in reservation["Instances"]:
+                ec2_data.append({
+                    "Region": region,
+                    "AvailabilityZone": instance.get("Placement", {}).get("AvailabilityZone", ""),
+                    "InstanceId": instance.get("InstanceId", ""),
+                    "InstanceType": instance.get("InstanceType", ""),
+                    "State": instance.get("State", {}).get("Name", ""),
+                    "AMI": instance.get("ImageId", ""),
+                    "PrivateIP": instance.get("PrivateIpAddress", "N/A"),
+                    "PublicIP": instance.get("PublicIpAddress", "N/A"),
+                    "VPC": instance.get("VpcId", "N/A"),
+                    "Name": next(
+                        (tag["Value"] for tag in instance.get("Tags", []) if tag["Key"] == "Name"),
+                        "N/A"
+                    ),
+                    "Tags": {tag["Key"]: tag["Value"] for tag in instance.get("Tags", [])}
+                })
+    return ec2_data
+
+def generate_confluence_table(ec2_data):
+    """Generates a Confluence-compatible table from EC2 instance data."""
+    table_rows = "".join(
+        f"""
+        <tr>
+            <td><p>{entry['Region']}</p></td>
+            <td><p>{entry['AvailabilityZone']}</p></td>
+            <td><p>{entry['Name']}</p></td>
+            <td><p>{entry['InstanceType']}</p></td>
+            <td><p>{entry['State']}</p></td>
+            <td><p>{entry['AMI']}</p></td>
+            <td><p>{entry['InstanceId']}</p></td>
+            <td><p>{entry['PrivateIP']}</p></td>
+            <td><p>{entry['PublicIP']}</p></td>
+            <td><p>{entry['VPC']}</p></td>
+            <td><p>{', '.join(f'{key}: {value}' for key, value in entry['Tags'].items())}</p></td>
+        </tr>
+        """
+        for entry in ec2_data
+    )
+    
+    return f"""
+    <table>
+        <tbody>
+            <tr>
+                <th><p>Region</p></th>
+                <th><p>Availability Zone</p></th>
+                <th><p>Name</p></th>
+                <th><p>Instance Type</p></th>
+                <th><p>State</p></th>
+                <th><p>AMI</p></th>
+                <th><p>Instance ID</p></th>
+                <th><p>Private IP</p></th>
+                <th><p>Public IP</p></th>
+                <th><p>VPC</p></th>
+                <th><p>Tags</p></th>
+            </tr>
+            {table_rows}
+        </tbody>
+    </table>
+    """
+
+def update_confluence_page(content):
+    """Update Confluence page with the given content."""
+    auth_header = base64.b64encode(f"{CONFLUENCE_EMAIL}:{CONFLUENCE_API_TOKEN}".encode()).decode()
+
+    headers = {
+        "Authorization": f"Basic {auth_header}",
+        "Content-Type": "application/json",
+    }
+    
+    try:
+        fetch_url = f"{CONFLUENCE_API_URL}{PAGE_ID}"
+        fetch_request = request.Request(fetch_url, headers=headers)
+        with request.urlopen(fetch_request) as response:
+            page_data = json.loads(response.read().decode())
+        
+        version = page_data["version"]["number"] + 1
+        
+        # Format content for Confluence storage format
+        formatted_content = f"""
+        <ac:structured-macro ac:name="info">
+            <ac:rich-text-body>
+                <p>🖥️ EC2 Instance Overview</p>
+                <p>This page provides an overview of EC2 instances across all AWS regions.
+                The data is automatically updated every 6 hours or when triggered by other Lambda functions.</p>
+            </ac:rich-text-body>
+        </ac:structured-macro>
+
+        <ac:structured-macro ac:name="status">
+            <ac:parameter ac:name="title">Overview</ac:parameter>
+            <ac:rich-text-body>
+                <p>AWS Account: {boto3.client('sts').get_caller_identity()['Account']}</p>
+                <p>Total EC2 Instances: {len(content['ec2_data'])}</p>
+                <p>Active Regions: {len(set(entry['Region'] for entry in content['ec2_data'] if entry['InstanceId']))}</p>
+            </ac:rich-text-body>
+        </ac:structured-macro>
+
+        <ac:structured-macro ac:name="status">
+            <ac:parameter ac:name="title">Network Statistics</ac:parameter>
+            <ac:rich-text-body>
+                <p>Instances with Public IP: {sum(1 for entry in content['ec2_data'] if entry['PublicIP'] != 'N/A')}</p>
+                <p>Total VPCs: {len({entry['VPC'] for entry in content['ec2_data']})}</p>
+            </ac:rich-text-body>
+        </ac:structured-macro>
+
+        {generate_confluence_table(content['ec2_data'])}
+
+        <p><em>Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}</em></p>
+        """
+        
+        updated_content = {
+            "version": {"number": version},
+            "title": page_data["title"],
+            "type": "page",
+            "body": {
+                "storage": {
+                    "value": formatted_content,
+                    "representation": "storage"
+                }
+            }
+        }
+        
+        update_request = request.Request(
+            fetch_url,
+            data=json.dumps(updated_content).encode(),
+            headers=headers,
+            method="PUT"
+        )
+        with request.urlopen(update_request) as update_response:
+            return "Confluence page updated successfully."
+            
+    except error.HTTPError as e:
+        error_body = e.read().decode() if hasattr(e, 'read') else ''
+        return f"Failed to update Confluence page: {e.code}, {e.reason}, Details: {error_body}"
+    except Exception as e:
+        return f"Error occurred: {str(e)}"
+
+def lambda_handler(event, context):
+    ec2_data = fetch_all_ec2_instances()
+    result = update_confluence_page({"ec2_data": ec2_data})
+    return {"statusCode": 200, "body": result}
+```
 
 IAM Permission :
 
